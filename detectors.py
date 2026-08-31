@@ -68,7 +68,9 @@ def _tokenize(text: str):
 
 _PATTERNS = {
     "EMAIL":    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
-    "PHONE":    re.compile(r"(?:\+?91[-\s]?)?[6-9]\d{4}[-\s]?\d{5}"),
+    # Phone: liberal catch for 10+ digits (US/international), formatted 3-3-4,
+    # and Indian format starting with 6-9. Goal is high recall, not precision.
+    "PHONE":    re.compile(r"\b\d{10,}\b|\d{3}[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)|[6-9]\d{4}[-.\s]?\d{5}|[6-9]\d{9}|(?:\+\d{1,3}[-.\s]?)?\d{6,}"),
     "PAN":      re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b"),
     "AADHAAR":  re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b"),
     "PIN_CODE": re.compile(r"\b\d{6}\b"),

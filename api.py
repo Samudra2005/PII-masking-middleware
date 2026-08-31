@@ -42,7 +42,7 @@ import time
 import uuid
 from typing import Dict, Optional, Tuple
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Cookie, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -119,22 +119,45 @@ class MaskRequest(BaseModel):
 class UnmaskRequest(BaseModel):
     payload: Dict
     fields: list
-    session_id: str
+    session_id: Optional[str] = None  # can come from a cookie instead — see below
 
 
 @app.post("/v1/mask")
-def mask(req: MaskRequest, x_api_key: Optional[str] = Header(default=None)):
+def mask(
+    req: MaskRequest,
+    response: Response,
+    x_api_key: Optional[str] = Header(default=None),
+    session_cookie: Optional[str] = Cookie(default=None, alias="session_id"),
+):
     _check_api_key(x_api_key)
-    session_id, vault = _get_vault(req.session_id)
+    # explicit session_id in the body always wins (lets a caller
+    # deliberately override); otherwise fall back to whatever the
+    # client's cookie jar sent back automatically
+    incoming_session = req.session_id or session_cookie
+    session_id, vault = _get_vault(incoming_session)
     masked_payload = _mask_payload(vault, req.payload, req.fields)
+    response.set_cookie(
+        key="session_id", value=session_id, httponly=True,
+        samesite="lax", max_age=SESSION_TTL_SECONDS,
+    )
     return {"payload": masked_payload, "session_id": session_id}
 
 
 @app.post("/v1/unmask")
-def unmask(req: UnmaskRequest, x_api_key: Optional[str] = Header(default=None)):
+def unmask(
+    req: UnmaskRequest,
+    response: Response,
+    x_api_key: Optional[str] = Header(default=None),
+    session_cookie: Optional[str] = Cookie(default=None, alias="session_id"),
+):
     _check_api_key(x_api_key)
-    if req.session_id not in _sessions:
+    incoming_session = req.session_id or session_cookie
+    if not incoming_session or incoming_session not in _sessions:
         raise HTTPException(status_code=404, detail="unknown or expired session_id")
-    vault, _ = _sessions[req.session_id]
+    vault, _ = _sessions[incoming_session]
     unmasked_payload = _unmask_payload(vault, req.payload, req.fields)
+    response.set_cookie(
+        key="session_id", value=incoming_session, httponly=True,
+        samesite="lax", max_age=SESSION_TTL_SECONDS,
+    )
     return {"payload": unmasked_payload}

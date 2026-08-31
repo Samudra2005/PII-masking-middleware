@@ -69,19 +69,23 @@ def call_llm(masked_transcript: str) -> str:
 class MiddlewareClient:
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
-        self.headers = {"Content-Type": "application/json", "X-API-Key": api_key}
+        # requests.Session() keeps a cookie jar automatically — the
+        # session_id cookie the middleware sets on /mask gets stored
+        # here and re-sent on /unmask without any code to track it.
+        # A bare requests.post() call would NOT do this on its own.
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json", "X-API-Key": api_key})
 
-    def mask(self, payload: dict, fields: list, session_id: str = None) -> dict:
+    def mask(self, payload: dict, fields: list) -> dict:
         body = {"payload": payload, "fields": fields}
-        if session_id:
-            body["session_id"] = session_id
-        r = requests.post(f"{self.base_url}/v1/mask", json=body, headers=self.headers)
+        r = self.session.post(f"{self.base_url}/v1/mask", json=body)
         r.raise_for_status()
         return r.json()
 
-    def unmask(self, payload: dict, fields: list, session_id: str) -> dict:
-        body = {"payload": payload, "fields": fields, "session_id": session_id}
-        r = requests.post(f"{self.base_url}/v1/unmask", json=body, headers=self.headers)
+    def unmask(self, payload: dict, fields: list) -> dict:
+        # no session_id passed here at all — the cookie jar handles it
+        body = {"payload": payload, "fields": fields}
+        r = self.session.post(f"{self.base_url}/v1/unmask", json=body)
         r.raise_for_status()
         return r.json()
 
@@ -104,7 +108,6 @@ def run_pipeline(text: str, middleware_url: str):
     print("=" * 70)
     mask_result = client.mask(payload=stt_output, fields=["transcript"])
     print(mask_result)
-    session_id = mask_result["session_id"]
     masked_transcript = mask_result["payload"]["transcript"]
 
     print("\n" + "=" * 70)
@@ -116,10 +119,9 @@ def run_pipeline(text: str, middleware_url: str):
 
     print("\n" + "=" * 70)
     print("STEP 4 — Master program calls middleware: POST /v1/unmask")
+    print("(note: no session_id passed here — the cookie jar carries it)")
     print("=" * 70)
-    unmask_result = client.unmask(
-        payload={"response": llm_reply}, fields=["response"], session_id=session_id
-    )
+    unmask_result = client.unmask(payload={"response": llm_reply}, fields=["response"])
     print(unmask_result)
 
     print("\n" + "=" * 70)

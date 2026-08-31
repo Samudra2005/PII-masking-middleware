@@ -77,17 +77,39 @@ class Handler(BaseHTTPRequestHandler):
         # Allows a browser-based frontend (e.g. the demo UI) to call
         # this API directly. Wide open (*) is fine for local/internal
         # demo use — tighten this to a specific origin before any real
-        # deployment.
+        # deployment. Note: wildcard origin is deliberately kept here
+        # rather than switching to credentialed CORS — browsers refuse
+        # to combine "allow any origin" with "allow cookies", so a
+        # page like demo.html (loaded from file://, effectively a
+        # unique/null origin) keeps using the JSON session_id field
+        # instead of cookies. Cookies are for server-to-server clients
+        # (see master_app.py), not the browser demo.
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
 
-    def _send_json(self, status, payload):
+    def _get_cookies(self) -> dict:
+        raw = self.headers.get("Cookie", "")
+        cookies = {}
+        for part in raw.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                cookies[k] = v
+        return cookies
+
+    def _send_json(self, status, payload, set_session_cookie=None):
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self._cors_headers()
+        if set_session_cookie:
+            self.send_header(
+                "Set-Cookie",
+                f"session_id={set_session_cookie}; HttpOnly; SameSite=Lax; "
+                f"Max-Age={SESSION_TTL_SECONDS}; Path=/",
+            )
         self.end_headers()
         self.wfile.write(body)
 
@@ -105,18 +127,33 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("X-API-Key") != API_KEY:
             return self._send_json(401, {"detail": "invalid or missing API key"})
 
+        cookies = self._get_cookies()
+        # explicit session_id in the request body always wins, so a
+        # caller can deliberately override — otherwise fall back to
+        # whatever the client's cookie jar sent back automatically
+        incoming_session = body.get("session_id") or cookies.get("session_id")
+
         if self.path == "/v1/mask":
-            session_id, vault = _get_vault(body.get("session_id"))
+            session_id, vault = _get_vault(incoming_session)
             masked_payload = _mask_payload(vault, body["payload"], body["fields"])
-            return self._send_json(200, {"payload": masked_payload, "session_id": session_id})
+            # Demo-friendly observability without writing any patient content
+            # or reversible token/session value to the console.
+            print(f"PII middleware: masked {len(body['fields'])} field(s)", flush=True)
+            return self._send_json(
+                200,
+                {"payload": masked_payload, "session_id": session_id},
+                set_session_cookie=session_id,
+            )
 
         if self.path == "/v1/unmask":
-            session_id = body.get("session_id")
-            if session_id not in _sessions:
+            if not incoming_session or incoming_session not in _sessions:
                 return self._send_json(404, {"detail": "unknown or expired session_id"})
-            vault, _ = _sessions[session_id]
+            vault, _ = _sessions[incoming_session]
             unmasked_payload = _unmask_payload(vault, body["payload"], body["fields"])
-            return self._send_json(200, {"payload": unmasked_payload})
+            print(f"PII middleware: restored {len(body['fields'])} field(s)", flush=True)
+            return self._send_json(
+                200, {"payload": unmasked_payload}, set_session_cookie=incoming_session
+            )
 
         return self._send_json(404, {"detail": "not found"})
 
@@ -125,6 +162,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = 8000
+    # Keep 8000 as the standalone default. When running alongside the
+    # MedScribe backend (which uses 8000), set MASKING_PORT=8001.
+    port = int(os.environ.get("MASKING_PORT", "8000"))
     print(f"listening on 0.0.0.0:{port} (reachable from other machines on this network)")
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
